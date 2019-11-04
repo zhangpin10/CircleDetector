@@ -18,6 +18,18 @@ if device_name != '/device:GPU:0':
   raise SystemError('GPU device not found')
 print('Found GPU at: {}'.format(device_name))
 
+kernel_size = 7
+img_w = 200
+img_h = 200
+feature_map_num = [1, 8, 16, 32]
+fc_size = 1024
+output_size = 3
+batch_size = 128
+start_learning_rate = 0.05
+decay_rate = 0.95
+decay_steps = 100
+epochs_num = 2
+batch_num = 10
 
 def draw_circle(img, row, col, rad):
     rr, cc, val = circle_perimeter_aa(row, col, rad)
@@ -28,7 +40,6 @@ def draw_circle(img, row, col, rad):
         (cc < img.shape[1])
     )
     img[rr[valid], cc[valid]] = val[valid]
-
 
 def noisy_circle(size, radius, noise):
     img = np.zeros((size, size), dtype=np.float)
@@ -43,11 +54,6 @@ def noisy_circle(size, radius, noise):
     img += noise * np.random.rand(*img.shape)
     return (row, col, rad), img
 
-def find_circle(img):
-    # Fill in this function
-    return 100, 100, 30
-
-
 def iou(params0, params1):
     row0, col0, rad0 = params0
     row1, col1, rad1 = params1
@@ -60,118 +66,124 @@ def iou(params0, params1):
         shape0.union(shape1).area
     )
 
+def find_circle(sess, prediction, x, x_batch):
+    # Fill in this function
+    return 100, 100, 30
 
-def main():
+def test():  
+  with tf.Session() as sess:
+    saver = tf.train.import_meta_graph('model.ckpt.meta')
+    saver.restore(sess,tf.train.latest_checkpoint('./'))
+    train_mode = tf.Variable(False, tf.bool)
+    x = tf.placeholder(tf.float32, shape=[None, img_w, img_h], name = "x")
+    prediction = convolutional_neural_network(x, train_mode)
+    sess.run(tf.global_variables_initializer())
+    sess.run(tf.local_variables_initializer())
+
     results = []
-    for _ in range(1000):
+    for i in range(1000):
+        print(i)
         params, img = noisy_circle(200, 50, 2)
-        detected = find_circle(img)
+        x_batch = []
+        x_batch.append(img)
+        detected = sess.run([prediction], feed_dict={x: x_batch})
+        detected = np.squeeze(detected)
         results.append(iou(params, detected))
     results = np.array(results)
     print((results > 0.7).mean())
+
+def batch_norm(x, n_out, train_mode, scope='bn'):
+  with tf.variable_scope(scope):
+    beta = tf.Variable(tf.constant(0.0, shape=[n_out]),
+                                  name='beta', trainable=True)
+    gamma = tf.Variable(tf.constant(1.0, shape=[n_out]),
+                                  name='gamma', trainable=True)
+    batch_mean, batch_var = tf.nn.moments(x, [0,1,2])
+    ema = tf.train.ExponentialMovingAverage(decay=0.9)
+
+    def mean_var_with_update():
+        ema_apply_op = ema.apply([batch_mean, batch_var])
+        with tf.control_dependencies([ema_apply_op]):
+            return tf.identity(batch_mean), tf.identity(batch_var)
+    
+    mean, var = tf.cond(train_mode,
+                        mean_var_with_update,
+                        lambda: (ema.average(batch_mean), ema.average(batch_var)))
+    normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
+    return normed
 
 def conv2d(x, W):
     return tf.nn.conv2d(x, W, strides=[1,1,1,1], padding='SAME')
 
 def maxpool2d(x):
-    #                        size of window         movement of window
     return tf.nn.max_pool(x, ksize=[1,2,2,1], strides=[1,2,2,1], padding='SAME')
 
-def batch_norm(x, n_out, train_node, scope='bn'):
-    """
-    Batch normalization on convolutional maps.
-    Args:
-        x:           Tensor, 5D BHWZD input maps
-        n_out:       integer, depth of input maps
-        phase_train: boolean tf.Varialbe, true indicates training phase
-        scope:       string, variable scope
-    Return:
-        normed:      batch-normalized maps
-    """
-    with tf.variable_scope(scope):
-        beta = tf.Variable(tf.constant(0.0, shape=[n_out]),
-                                     name='beta', trainable=True)
-        gamma = tf.Variable(tf.constant(1.0, shape=[n_out]),
-                                      name='gamma', trainable=True)
-        batch_mean, batch_var = tf.nn.moments(x, [0,1,2], name='moments')
-        ema = tf.train.ExponentialMovingAverage(decay=0.9)
+def convolutional_neural_network(x, train_mode):
+  x = tf.reshape(x, shape=[-1, img_w, img_h, 1])
 
-        def mean_var_with_update():
-            ema_apply_op = ema.apply([batch_mean, batch_var])
-            with tf.control_dependencies([ema_apply_op]):
-                return tf.identity(batch_mean), tf.identity(batch_var)
-        
-        mean, var = tf.cond(train_node,
-                            mean_var_with_update,
-                            lambda: (ema.average(batch_mean), ema.average(batch_var)))
-        normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
-    return normed
+  weights = {'W_conv1':tf.Variable(tf.random_normal([kernel_size, kernel_size, 1, feature_map_num[1]])),
+              'W_conv2':tf.Variable(tf.random_normal([kernel_size, kernel_size, feature_map_num[1], feature_map_num[2]])),
+              'W_conv3':tf.Variable(tf.random_normal([kernel_size, kernel_size, feature_map_num[2], feature_map_num[3]])),
+              'W_conv4':tf.Variable(tf.random_normal([1, 1, feature_map_num[3], 1])),
+              'W_fc':tf.Variable(tf.random_normal([img_w * img_h, fc_size])),
+              'W_out':tf.Variable(tf.random_normal([fc_size, output_size]))}
 
-def convolutional_neural_network(x):
-  x = tf.reshape(x, shape=[-1, 200, 200, 1])
-
-  weights = {'W_conv1':tf.Variable(tf.random_normal([7,7,1,8])),
-              'W_conv2':tf.Variable(tf.random_normal([7,7,8,16])),
-              'W_conv3':tf.Variable(tf.random_normal([7,7,16,32])),
-              'W_conv4':tf.Variable(tf.random_normal([1,1,32,1])),
-              'W_fc':tf.Variable(tf.random_normal([200*200,1024])),
-              'out':tf.Variable(tf.random_normal([1024, 3]))}
-
-  biases = {'b_conv1':tf.Variable(tf.random_normal([8])),
-            'b_conv2':tf.Variable(tf.random_normal([16])),
-            'b_conv3':tf.Variable(tf.random_normal([32])),
+  biases = {'b_conv1':tf.Variable(tf.random_normal([feature_map_num[1]])),
+            'b_conv2':tf.Variable(tf.random_normal([feature_map_num[2]])),
+            'b_conv3':tf.Variable(tf.random_normal([feature_map_num[3]])),
             'b_conv4':tf.Variable(tf.random_normal([1])),
-            'b_fc':tf.Variable(tf.random_normal([1024])),
-            'out':tf.Variable(tf.random_normal([3]))}
-
-  train_node = tf.Variable(True,tf.bool, name='train') 
+            'b_fc':tf.Variable(tf.random_normal([fc_size])),
+            'b_out':tf.Variable(tf.random_normal([output_size]))}
 
   conv1 = tf.nn.relu(conv2d(x, weights['W_conv1']) + biases['b_conv1'])
-  conv1 = batch_norm(conv1, 8, train_node)
+  conv1 = batch_norm(conv1, feature_map_num[1], train_mode)
 
   conv2 = tf.nn.relu(conv2d(conv1, weights['W_conv2']) + biases['b_conv2'])
-  conv2 = batch_norm(conv2, 16, train_node)
+  conv2 = batch_norm(conv2, feature_map_num[2], train_mode)
 
   conv3 = tf.nn.relu(conv2d(conv2, weights['W_conv3']) + biases['b_conv3'])
-  conv3 = batch_norm(conv3, 32, train_node)
+  conv3 = batch_norm(conv3, feature_map_num[3], train_mode)
 
   conv4 = tf.nn.relu(conv2d(conv3, weights['W_conv4']) + biases['b_conv4'])
-  conv4 = batch_norm(conv4, 1, train_node)
+  conv4 = batch_norm(conv4, 1, train_mode)
 
-  fc = tf.reshape(conv4,[-1, 200*200])
+  fc = tf.reshape(conv4,[-1, img_w * img_h])
   fc = tf.nn.relu(tf.matmul(fc, weights['W_fc'])+biases['b_fc'])
-
-  output = tf.matmul(fc, weights['out'])+biases['out']
-  
+  output = tf.matmul(fc, weights['W_out'])+biases['b_out']
   return output
 
 def train_neural_network():
+  x = tf.placeholder(tf.float32, shape=[None, img_w, img_h], name = "x")
+  y = tf.placeholder(tf.float32, shape = [None, output_size], name = "y")
+  global_step = tf.Variable(0, trainable=False)
 
-  x = tf.placeholder(tf.float32, shape=[None, 200, 200], name = "x")
-  y = tf.placeholder(tf.float32, shape = [None, 3], name = "y")
-  
-  #ratio = convolutional_neural_network(x)
-  #prediction = tf.multiply(ratio, [200, 200, 50])
-  prediction = convolutional_neural_network(x)
-  cost = tf.math.reduce_sum(tf.math.square(prediction - y))/64
-  optimizer = tf.train.AdamOptimizer().minimize(cost)
-  
-  hm_epochs = 10
-  batch_num = 300
+  train_mode = tf.Variable(True, tf.bool)
+  prediction = convolutional_neural_network(x, train_mode)
+  cost = tf.math.reduce_sum(tf.math.square(prediction - y)) / batch_size
+  learning_rate = tf.train.exponential_decay(start_learning_rate, global_step,
+                                          decay_steps, decay_rate, staircase=True)
+  optimizer = tf.train.AdamOptimizer(learning_rate).minimize(cost, global_step=global_step)
+
   with tf.Session() as sess:
     tf.global_variables_initializer().run()
     sess.run(tf.initialize_all_variables())
-    for epoch in range(hm_epochs):
+    f = open('output.txt', 'w')
+    for epoch in range(epochs_num):
         epoch_loss = 0
         for i in range(batch_num):
             x_batch = []
             y_batch = []
-            for _ in range(64):
+            for _ in range(batch_size):
                   params, img = noisy_circle(200, 50, 2)
                   y_batch.append(params), x_batch.append(img)
-            _, c, p, label= sess.run([optimizer, cost, prediction, y], feed_dict={x: x_batch, y: y_batch})
-            print('Epoch:', epoch, '  Batch:', i, '  Loss:', c, '  Prediction:', p[0], '  Label:', label[0])  
-
+            _, loss, pre, label, lr = sess.run([optimizer, cost, prediction, y, learning_rate], feed_dict={x: x_batch, y: y_batch})
+            print('Epoch: ', epoch, '  Batch: ', i, '  Loss: ', loss, '  Prediction: ', pre[0], '  Label: ', label[0], ' learning_rate: ', lr)  
+            f.write('Epoch: ' + str(epoch) + ',  Batch: ' + str(i) + ',  Loss: ' + str(loss))
+            f.write('\n')
+        saver = tf.train.Saver()
+        save_path = saver.save(sess, "model.ckpt")
+  f.close()
 
 if __name__ == '__main__':
-  train_neural_network()
+  #train_neural_network()
+  test()
